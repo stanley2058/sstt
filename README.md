@@ -67,6 +67,13 @@ Example:
   "model": "whisper-large-v3-turbo",
   "minDurationMs": 300,
   "transcriptionTimeoutMs": 30000,
+  "audioFeedback": {
+    "enabled": true,
+    "volume": 0.12,
+    "durationMs": 90,
+    "startFrequencyHz": 940,
+    "stopFrequencyHz": 680
+  },
   "cleanup": {
     "enabled": true,
     "model": "openai/gpt-5-nano",
@@ -94,6 +101,12 @@ Cleanup settings:
   - Examples: `openai/gpt-5-nano`, `groq/openai/gpt-oss-120b`
 - `cleanup.temperature`: recommended `0` to keep output close to raw STT.
 
+Audio feedback settings:
+- `audioFeedback.enabled`: play beep on recording start/stop.
+- `audioFeedback.volume`: `0.0` to `1.0`.
+- `audioFeedback.durationMs`: beep duration.
+- `audioFeedback.startFrequencyHz` / `audioFeedback.stopFrequencyHz`: start/stop beep tones.
+
 API keys can come from either:
 - `config.json` (`apiKeys.groq` / `apiKeys.openai`)
 - environment variables (`GROQ_API_KEY` / `OPENAI_API_KEY`)
@@ -107,6 +120,7 @@ Provider/model defaults:
 - `pw-record` (PipeWire)
 - `wl-copy` for clipboard sink
 - input sink fallback order: `wtype` -> `ydotool`
+- audio feedback playback command (first available): `pw-play` -> `paplay` -> `aplay`
 
 ## Suggested compositor bindings
 

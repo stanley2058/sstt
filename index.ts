@@ -9,6 +9,14 @@ type Sink = "input" | "clipboard";
 type ProviderName = "groq" | "openai";
 type ProviderModelSpec = `${ProviderName}/${string}`;
 
+type AudioFeedbackConfig = {
+  enabled: boolean;
+  volume: number;
+  durationMs: number;
+  startFrequencyHz: number;
+  stopFrequencyHz: number;
+};
+
 type CleanupConfig = {
   enabled: boolean;
   model: ProviderModelSpec;
@@ -23,6 +31,7 @@ type AppConfig = {
   language?: string;
   minDurationMs: number;
   transcriptionTimeoutMs: number;
+  audioFeedback: AudioFeedbackConfig;
   cleanup: CleanupConfig;
   recording: {
     sampleRate: number;
@@ -55,6 +64,13 @@ const DEFAULT_CONFIG: AppConfig = {
   model: "whisper-large-v3-turbo",
   minDurationMs: 300,
   transcriptionTimeoutMs: 30000,
+  audioFeedback: {
+    enabled: true,
+    volume: 0.12,
+    durationMs: 90,
+    startFrequencyHz: 940,
+    stopFrequencyHz: 680,
+  },
   cleanup: {
     enabled: false,
     model: "openai/gpt-5-nano",
@@ -103,6 +119,22 @@ function asNonNegativeNumber(value: unknown, fallback: number): number {
   return value;
 }
 
+function asNumberInRange(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  if (value < min) {
+    return min;
+  }
+
+  if (value > max) {
+    return max;
+  }
+
+  return value;
+}
+
 function asBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
@@ -141,6 +173,7 @@ function parseConfig(raw: unknown): AppConfig {
   const recordingRaw = isRecord(raw.recording) ? raw.recording : {};
   const apiKeysRaw = isRecord(raw.apiKeys) ? raw.apiKeys : {};
   const cleanupRaw = isRecord(raw.cleanup) ? raw.cleanup : {};
+  const audioFeedbackRaw = isRecord(raw.audioFeedback) ? raw.audioFeedback : {};
 
   const cleanupModelRaw = asOptionalString(cleanupRaw.model) ?? DEFAULT_CONFIG.cleanup.model;
   parseProviderModelSpec(cleanupModelRaw);
@@ -155,6 +188,22 @@ function parseConfig(raw: unknown): AppConfig {
       raw.transcriptionTimeoutMs,
       DEFAULT_CONFIG.transcriptionTimeoutMs,
     ),
+    audioFeedback: {
+      enabled: asBoolean(audioFeedbackRaw.enabled, DEFAULT_CONFIG.audioFeedback.enabled),
+      volume: asNumberInRange(audioFeedbackRaw.volume, DEFAULT_CONFIG.audioFeedback.volume, 0, 1),
+      durationMs: asPositiveNumber(
+        audioFeedbackRaw.durationMs,
+        DEFAULT_CONFIG.audioFeedback.durationMs,
+      ),
+      startFrequencyHz: asPositiveNumber(
+        audioFeedbackRaw.startFrequencyHz,
+        DEFAULT_CONFIG.audioFeedback.startFrequencyHz,
+      ),
+      stopFrequencyHz: asPositiveNumber(
+        audioFeedbackRaw.stopFrequencyHz,
+        DEFAULT_CONFIG.audioFeedback.stopFrequencyHz,
+      ),
+    },
     cleanup: {
       enabled: asBoolean(cleanupRaw.enabled, DEFAULT_CONFIG.cleanup.enabled),
       model: cleanupModel,
@@ -275,6 +324,75 @@ function commandExists(command: string): boolean {
   return result.exitCode === 0;
 }
 
+type PlaybackCommand = {
+  command: string;
+  args: string[];
+};
+
+type BeepType = "start" | "stop";
+
+function selectPlaybackCommand(): PlaybackCommand | null {
+  if (commandExists("pw-play")) {
+    return { command: "pw-play", args: [] };
+  }
+
+  if (commandExists("paplay")) {
+    return { command: "paplay", args: [] };
+  }
+
+  if (commandExists("aplay")) {
+    return { command: "aplay", args: [] };
+  }
+
+  return null;
+}
+
+function writeAscii(view: DataView, offset: number, text: string): void {
+  for (let i = 0; i < text.length; i += 1) {
+    view.setUint8(offset + i, text.charCodeAt(i));
+  }
+}
+
+function createSineWaveWav(
+  frequencyHz: number,
+  durationMs: number,
+  volume: number,
+  sampleRate = 16000,
+): Uint8Array {
+  const sampleCount = Math.max(1, Math.round((durationMs / 1000) * sampleRate));
+  const channels = 1;
+  const bitsPerSample = 16;
+  const bytesPerSample = bitsPerSample / 8;
+  const dataSize = sampleCount * channels * bytesPerSample;
+  const wavSize = 44 + dataSize;
+  const wav = new Uint8Array(wavSize);
+  const view = new DataView(wav.buffer);
+
+  writeAscii(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeAscii(view, 8, "WAVE");
+  writeAscii(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * bytesPerSample, true);
+  view.setUint16(32, channels * bytesPerSample, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeAscii(view, 36, "data");
+  view.setUint32(40, dataSize, true);
+
+  for (let i = 0; i < sampleCount; i += 1) {
+    const t = i / sampleRate;
+    const sample = Math.sin(2 * Math.PI * frequencyHz * t);
+    const value = Math.max(-1, Math.min(1, sample * volume));
+    const pcmValue = Math.round(value * 32767);
+    view.setInt16(44 + i * 2, pcmValue, true);
+  }
+
+  return wav;
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -286,6 +404,53 @@ function isProcessAlive(pid: number): boolean {
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runCommandQuiet(command: string, args: string[]): Promise<void> {
+  const processResult = Bun.spawn([command, ...args], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+
+  const exitCode = await processResult.exited;
+  if (exitCode !== 0) {
+    throw new Error(`${command} exited with code ${exitCode}`);
+  }
+}
+
+async function playFeedbackTone(config: AppConfig, beepType: BeepType): Promise<void> {
+  if (!config.audioFeedback.enabled) {
+    return;
+  }
+
+  const playback = selectPlaybackCommand();
+  if (!playback) {
+    console.error("Warning: audio feedback enabled, but no playback command found");
+    return;
+  }
+
+  await ensureStateDirs();
+
+  const frequencyHz =
+    beepType === "start"
+      ? config.audioFeedback.startFrequencyHz
+      : config.audioFeedback.stopFrequencyHz;
+
+  const wav = createSineWaveWav(
+    frequencyHz,
+    config.audioFeedback.durationMs,
+    config.audioFeedback.volume,
+  );
+
+  const beepPath = join(STATE_DIR, `beep-${beepType}.wav`);
+  await writeFile(beepPath, wav);
+
+  try {
+    await runCommandQuiet(playback.command, [...playback.args, beepPath]);
+  } catch (error) {
+    console.error(`Warning: failed to play ${beepType} beep. ${String(error)}`);
+  }
 }
 
 async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
@@ -522,6 +687,8 @@ async function startCommand(args: string[]): Promise<void> {
 
   await ensureStateDirs();
 
+  await playFeedbackTone(config, "start");
+
   const audioPath = join(RECORDINGS_DIR, `${Date.now()}-${crypto.randomUUID()}.wav`);
   const cmd = [
     "pw-record",
@@ -599,6 +766,7 @@ async function stopCommand(): Promise<void> {
 
   await stopRecorder(session.pid);
   await clearSession();
+  await playFeedbackTone(config, "stop");
 
   const durationMs = await estimateWavDurationMs(
     session.audioPath,
