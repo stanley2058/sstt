@@ -31,6 +31,9 @@ bun run index.ts start
 # Start recording to clipboard sink
 bun run index.ts start --to clipboard
 
+# Toggle recording state (idle -> start, recording -> stop)
+bun run index.ts toggle --to input
+
 # Stop recording, transcribe, and emit to sink
 bun run index.ts stop
 
@@ -42,6 +45,7 @@ You can also use the script alias:
 
 ```bash
 bun run stt -- start --to input
+bun run stt -- toggle --to clipboard
 bun run stt -- stop
 ```
 
@@ -131,5 +135,9 @@ Hold-to-talk pattern:
 Clipboard variant:
 - key press: `linux-stt start --to clipboard`
 - key release: `linux-stt stop`
+
+Single-key toggle alternative:
+- key press: `linux-stt toggle --to input`
+- key press: `linux-stt toggle --to clipboard`
 
 Adjust exact binding syntax in your compositor config.

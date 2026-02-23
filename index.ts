@@ -89,12 +89,14 @@ function printHelp(): void {
 
 Usage:
   linux-stt start [--to input|clipboard]
+  linux-stt toggle [--to input|clipboard]
   linux-stt stop
   linux-stt status
   linux-stt help
 
 Notes:
   - Start begins recording with pw-record.
+  - Toggle starts when idle, stops when recording.
   - Stop ends recording, transcribes audio, and sends output to your selected sink.
   - Config lives at ${CONFIG_PATH}`);
 }
@@ -466,7 +468,7 @@ async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boole
   return !isProcessAlive(pid);
 }
 
-function parseStartSink(args: string[]): Sink {
+function parseSinkArg(args: string[], commandName: "start" | "toggle"): Sink {
   let sink: Sink = "input";
 
   for (let i = 0; i < args.length; i += 1) {
@@ -500,7 +502,7 @@ function parseStartSink(args: string[]): Sink {
       continue;
     }
 
-    throw new Error(`Unknown argument for start: ${arg}`);
+    throw new Error(`Unknown argument for ${commandName}: ${arg}`);
   }
 
   return sink;
@@ -666,9 +668,9 @@ async function estimateWavDurationMs(
   return Math.round((pcmBytes / bytesPerSecond) * 1000);
 }
 
-async function startCommand(args: string[]): Promise<void> {
-  const config = await ensureConfig();
-  const sink = parseStartSink(args);
+async function startCommand(args: string[], preloadedConfig?: AppConfig): Promise<void> {
+  const config = preloadedConfig ?? (await ensureConfig());
+  const sink = parseSinkArg(args, "start");
 
   if (!commandExists("pw-record")) {
     throw new Error("Missing pw-record (install PipeWire tools)");
@@ -802,6 +804,23 @@ async function stopCommand(): Promise<void> {
   }
 }
 
+async function toggleCommand(args: string[]): Promise<void> {
+  parseSinkArg(args, "toggle");
+
+  const session = await readSession();
+  if (session && isProcessAlive(session.pid)) {
+    await stopCommand();
+    return;
+  }
+
+  if (session) {
+    await clearSession();
+  }
+
+  const config = await ensureConfig();
+  await startCommand(args, config);
+}
+
 async function statusCommand(): Promise<void> {
   const session = await readSession();
   if (!session) {
@@ -831,6 +850,11 @@ async function main(): Promise<void> {
 
   if (command === "start") {
     await startCommand(argv.slice(1));
+    return;
+  }
+
+  if (command === "toggle") {
+    await toggleCommand(argv.slice(1));
     return;
   }
 
