@@ -1,4 +1,4 @@
-import { experimental_transcribe as transcribe } from "ai";
+import { experimental_transcribe as transcribe, generateText } from "ai";
 import { createGroq } from "@ai-sdk/groq";
 import { createOpenAI } from "@ai-sdk/openai";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -7,6 +7,15 @@ import { join } from "node:path";
 
 type Sink = "input" | "clipboard";
 type ProviderName = "groq" | "openai";
+type ProviderModelSpec = `${ProviderName}/${string}`;
+
+type CleanupConfig = {
+  enabled: boolean;
+  model: ProviderModelSpec;
+  temperature: number;
+  maxOutputTokens: number;
+  timeoutMs: number;
+};
 
 type AppConfig = {
   provider: ProviderName;
@@ -14,6 +23,7 @@ type AppConfig = {
   language?: string;
   minDurationMs: number;
   transcriptionTimeoutMs: number;
+  cleanup: CleanupConfig;
   recording: {
     sampleRate: number;
     channels: number;
@@ -45,6 +55,13 @@ const DEFAULT_CONFIG: AppConfig = {
   model: "whisper-large-v3-turbo",
   minDurationMs: 300,
   transcriptionTimeoutMs: 30000,
+  cleanup: {
+    enabled: false,
+    model: "openai/gpt-5-nano",
+    temperature: 0,
+    maxOutputTokens: 160,
+    timeoutMs: 10000,
+  },
   recording: {
     sampleRate: 16000,
     channels: 1,
@@ -78,8 +95,39 @@ function asPositiveNumber(value: unknown, fallback: number): number {
   return value;
 }
 
+function asNonNegativeNumber(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return fallback;
+  }
+
+  return value;
+}
+
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
 function asOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function parseProviderModelSpec(spec: string): { provider: ProviderName; modelId: string } {
+  const separatorIndex = spec.indexOf("/");
+  if (separatorIndex < 1 || separatorIndex === spec.length - 1) {
+    throw new Error(
+      `Invalid model spec "${spec}". Expected format provider/model-id, e.g. openai/gpt-5-nano.`,
+    );
+  }
+
+  const providerPart = spec.slice(0, separatorIndex);
+  if (providerPart !== "groq" && providerPart !== "openai") {
+    throw new Error(`Unsupported provider "${providerPart}" in model spec "${spec}"`);
+  }
+
+  return {
+    provider: providerPart,
+    modelId: spec.slice(separatorIndex + 1),
+  };
 }
 
 function parseConfig(raw: unknown): AppConfig {
@@ -92,6 +140,11 @@ function parseConfig(raw: unknown): AppConfig {
 
   const recordingRaw = isRecord(raw.recording) ? raw.recording : {};
   const apiKeysRaw = isRecord(raw.apiKeys) ? raw.apiKeys : {};
+  const cleanupRaw = isRecord(raw.cleanup) ? raw.cleanup : {};
+
+  const cleanupModelRaw = asOptionalString(cleanupRaw.model) ?? DEFAULT_CONFIG.cleanup.model;
+  parseProviderModelSpec(cleanupModelRaw);
+  const cleanupModel = cleanupModelRaw as ProviderModelSpec;
 
   const parsed: AppConfig = {
     provider,
@@ -102,6 +155,19 @@ function parseConfig(raw: unknown): AppConfig {
       raw.transcriptionTimeoutMs,
       DEFAULT_CONFIG.transcriptionTimeoutMs,
     ),
+    cleanup: {
+      enabled: asBoolean(cleanupRaw.enabled, DEFAULT_CONFIG.cleanup.enabled),
+      model: cleanupModel,
+      temperature: asNonNegativeNumber(
+        cleanupRaw.temperature,
+        DEFAULT_CONFIG.cleanup.temperature,
+      ),
+      maxOutputTokens: asPositiveNumber(
+        cleanupRaw.maxOutputTokens,
+        DEFAULT_CONFIG.cleanup.maxOutputTokens,
+      ),
+      timeoutMs: asPositiveNumber(cleanupRaw.timeoutMs, DEFAULT_CONFIG.cleanup.timeoutMs),
+    },
     recording: {
       sampleRate: asPositiveNumber(
         recordingRaw.sampleRate,
@@ -335,30 +401,70 @@ async function routeTranscript(sink: Sink, text: string): Promise<void> {
   throw new Error("Input sink needs wtype or ydotool");
 }
 
-function selectModel(config: AppConfig): { model: ReturnType<ReturnType<typeof createGroq>["transcription"]> | ReturnType<ReturnType<typeof createOpenAI>["transcription"]>; providerOptions?: Record<string, Record<string, string>> } {
-  if (config.provider === "openai") {
-    const apiKey = config.apiKeys?.openai ?? process.env.OPENAI_API_KEY;
-    if (!apiKey) {
+function getApiKey(config: AppConfig, provider: ProviderName): string {
+  if (provider === "openai") {
+    const key = config.apiKeys?.openai ?? process.env.OPENAI_API_KEY;
+    if (!key) {
       throw new Error("OPENAI_API_KEY is missing (env or config.apiKeys.openai)");
     }
 
-    const provider = createOpenAI({ apiKey });
+    return key;
+  }
+
+  const key = config.apiKeys?.groq ?? process.env.GROQ_API_KEY;
+  if (!key) {
+    throw new Error("GROQ_API_KEY is missing (env or config.apiKeys.groq)");
+  }
+
+  return key;
+}
+
+function selectModel(config: AppConfig): { model: ReturnType<ReturnType<typeof createGroq>["transcription"]> | ReturnType<ReturnType<typeof createOpenAI>["transcription"]>; providerOptions?: Record<string, Record<string, string>> } {
+  if (config.provider === "openai") {
+    const provider = createOpenAI({ apiKey: getApiKey(config, "openai") });
     return {
       model: provider.transcription(config.model ?? "gpt-4o-mini-transcribe"),
       providerOptions: config.language ? { openai: { language: config.language } } : undefined,
     };
   }
 
-  const apiKey = config.apiKeys?.groq ?? process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    throw new Error("GROQ_API_KEY is missing (env or config.apiKeys.groq)");
-  }
-
-  const provider = createGroq({ apiKey });
+  const provider = createGroq({ apiKey: getApiKey(config, "groq") });
   return {
     model: provider.transcription(config.model ?? "whisper-large-v3-turbo"),
     providerOptions: config.language ? { groq: { language: config.language } } : undefined,
   };
+}
+
+async function cleanupTranscript(config: AppConfig, transcript: string): Promise<string> {
+  const rawText = transcript.trim();
+  if (!config.cleanup.enabled || rawText.length === 0) {
+    return rawText;
+  }
+
+  try {
+    const modelSpec = parseProviderModelSpec(config.cleanup.model);
+
+    const model =
+      modelSpec.provider === "openai"
+        ? createOpenAI({ apiKey: getApiKey(config, "openai") }).languageModel(modelSpec.modelId)
+        : createGroq({ apiKey: getApiKey(config, "groq") }).languageModel(modelSpec.modelId);
+
+    const result = await generateText({
+      model,
+      temperature: config.cleanup.temperature,
+      maxOutputTokens: config.cleanup.maxOutputTokens,
+      abortSignal: AbortSignal.timeout(config.cleanup.timeoutMs),
+      system:
+        "You clean speech-to-text output. Keep wording, meaning, and tone as close as possible. Remove filler words, disfluencies, duplicate fragments, and obvious recognition artifacts. Keep intentional slang and names. Return only the cleaned sentence.",
+      prompt: `Raw transcript:\n${rawText}\n\nCleaned transcript:`,
+    });
+
+    const cleanedText = result.text.trim();
+    return cleanedText.length > 0 ? cleanedText : rawText;
+  } catch (error) {
+    console.error(`Warning: Transcript cleanup failed, using raw text. ${String(error)}`);
+    return rawText;
+  }
 }
 
 async function transcribeAudio(config: AppConfig, audioPath: string): Promise<string> {
@@ -516,8 +622,10 @@ async function stopCommand(): Promise<void> {
       return;
     }
 
-    await routeTranscript(session.sink, transcript);
-    console.log(transcript);
+    const finalText = await cleanupTranscript(config, transcript);
+
+    await routeTranscript(session.sink, finalText);
+    console.log(finalText);
     await rm(session.audioPath, { force: true });
   } catch (error) {
     throw new Error(

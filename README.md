@@ -67,6 +67,13 @@ Example:
   "model": "whisper-large-v3-turbo",
   "minDurationMs": 300,
   "transcriptionTimeoutMs": 30000,
+  "cleanup": {
+    "enabled": true,
+    "model": "openai/gpt-5-nano",
+    "temperature": 0,
+    "maxOutputTokens": 160,
+    "timeoutMs": 10000
+  },
   "recording": {
     "sampleRate": 16000,
     "channels": 1
@@ -80,6 +87,12 @@ Example:
 
 Optional field:
 - `language`: set a forced language code like `"en"`; omit for auto-detection.
+
+Cleanup settings:
+- `cleanup.enabled`: enable/disable LLM cleanup pass after STT.
+- `cleanup.model`: provider/model-id format where everything after the first slash is model ID.
+  - Examples: `openai/gpt-5-nano`, `groq/openai/gpt-oss-120b`
+- `cleanup.temperature`: recommended `0` to keep output close to raw STT.
 
 API keys can come from either:
 - `config.json` (`apiKeys.groq` / `apiKeys.openai`)
