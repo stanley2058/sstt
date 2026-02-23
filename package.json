@@ -1,0 +1,25 @@
+{
+  "name": "linux-stt",
+  "module": "index.ts",
+  "bin": {
+    "linux-stt": "./index.ts"
+  },
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "stt": "bun run index.ts",
+    "build": "bun build ./index.ts --target=bun --format=esm --outfile=./dist/linux-stt.js --banner \"#!/usr/bin/env bun\"",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@ai-sdk/groq": "^3.0.24",
+    "@ai-sdk/openai": "^3.0.30",
+    "ai": "^6.0.97"
+  }
+}
