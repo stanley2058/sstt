@@ -1,12 +1,12 @@
-# linux-stt
+# sstt
 
-Wayland speech-to-text CLI in Bun + TypeScript + AI SDK.
+Speech-to-text CLI in Bun + TypeScript + AI SDK.
 
 Stage 1 features:
 - STT -> input
 - STT -> clipboard
 
-No keybind logic is built in. Your compositor should call the commands.
+No keybind logic is built in. Your compositor, launcher, or hotkey tool should call the commands.
 
 ## Install
 
@@ -20,7 +20,7 @@ bun install
 bun run build
 ```
 
-This emits a single bundled CLI file at `dist/linux-stt.js` with a shebang banner.
+This emits a single bundled CLI file at `dist/sstt.js` with a shebang banner.
 
 ## Commands
 
@@ -39,6 +39,9 @@ bun run index.ts stop
 
 # Check whether recording is active
 bun run index.ts status
+
+# Print config and state paths
+bun run index.ts paths
 ```
 
 You can also use the script alias:
@@ -47,9 +50,10 @@ You can also use the script alias:
 bun run stt -- start --to input
 bun run stt -- toggle --to clipboard
 bun run stt -- stop
+bun run stt -- paths
 ```
 
-To expose a `linux-stt` command for compositor bindings:
+To expose an `sstt` command for keybindings:
 
 ```bash
 bun link
@@ -59,9 +63,21 @@ bun link
 
 Config file path:
 
-`~/.config/linux-stt/config.json`
+- Linux: `~/.config/sstt/config.json`
+- macOS: `~/Library/Application Support/sstt/config.json`
 
-The app auto-creates this file on first run.
+Runtime state path:
+
+- Linux: `~/.local/state/sstt`
+- macOS: `~/Library/Caches/sstt`
+
+The app auto-creates the config file on first run.
+
+You can print the active paths at any time with:
+
+```bash
+sstt paths
+```
 
 Example:
 
@@ -119,25 +135,44 @@ Provider/model defaults:
 - `provider: "groq"` -> `model: "whisper-large-v3-turbo"`
 - `provider: "openai"` -> `model: "gpt-4o-mini-transcribe"`
 
-## Runtime dependencies (Wayland)
+## Runtime dependencies
+
+### Linux
 
 - `pw-record` (PipeWire)
 - `wl-copy` for clipboard sink
 - input sink fallback order: `wtype` -> `ydotool`
 - audio feedback playback command (first available): `pw-play` -> `paplay` -> `aplay`
 
-## Suggested compositor bindings
+### macOS
 
-Hold-to-talk pattern:
-- key press: `linux-stt start --to input`
-- key release: `linux-stt stop`
+- `ffmpeg` for audio capture
+- `pbcopy` / `pbpaste` for clipboard integration
+- `osascript` for input sink paste
+- `afplay` for audio feedback
 
-Clipboard variant:
-- key press: `linux-stt start --to clipboard`
-- key release: `linux-stt stop`
+macOS input sink behavior:
+- `--to clipboard`: copy transcript to the clipboard
+- `--to input`: copy transcript, send `Cmd+V` to the frontmost app, then restore the previous text clipboard
+
+macOS permissions:
+- microphone permission for the terminal or launcher running `sstt`
+- Accessibility / Automation permission for the terminal or launcher if you use `--to input`
+
+## Suggested keybindings
+
+Linux hold-to-talk pattern:
+- key press: `sstt start --to input`
+- key release: `sstt stop`
+
+Linux clipboard variant:
+- key press: `sstt start --to clipboard`
+- key release: `sstt stop`
 
 Single-key toggle alternative:
-- key press: `linux-stt toggle --to input`
-- key press: `linux-stt toggle --to clipboard`
+- key press: `sstt toggle --to input`
+- key press: `sstt toggle --to clipboard`
 
-Adjust exact binding syntax in your compositor config.
+Adjust exact binding syntax in your compositor or launcher config.
+
+On macOS, use a hotkey tool that does not steal focus from the target app before `sstt stop` runs, since `--to input` pastes into the current frontmost app.
