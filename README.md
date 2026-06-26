@@ -94,6 +94,10 @@ Example:
     "startFrequencyHz": 940,
     "stopFrequencyHz": 680
   },
+  "desktopNotifications": {
+    "enabled": true,
+    "reminderIntervalMs": 300000
+  },
   "cleanup": {
     "enabled": true,
     "model": "openai/gpt-5-nano",
@@ -127,6 +131,10 @@ Audio feedback settings:
 - `audioFeedback.durationMs`: beep duration.
 - `audioFeedback.startFrequencyHz` / `audioFeedback.stopFrequencyHz`: start/stop beep tones.
 
+Desktop notification settings:
+- `desktopNotifications.enabled`: show start/stop notifications and active-recording reminders.
+- `desktopNotifications.reminderIntervalMs`: reminder interval while recording; set `0` to disable reminders while keeping start/stop notifications.
+
 API keys can come from either:
 - `config.json` (`apiKeys.groq` / `apiKeys.openai`)
 - environment variables (`GROQ_API_KEY` / `OPENAI_API_KEY`)
@@ -143,12 +151,14 @@ Provider/model defaults:
 - `wl-copy` for clipboard sink
 - input sink fallback order: `wtype` -> `ydotool`
 - audio feedback playback command (first available): `pw-play` -> `paplay` -> `aplay`
+- desktop notifications (first available): `notify-send` -> `kdialog`
 
 ### macOS
 
 - `ffmpeg` for audio capture
 - `pbcopy` / `pbpaste` for clipboard integration
 - `osascript` for input sink paste
+- `osascript` for desktop notifications
 - `afplay` for audio feedback
 
 macOS input sink behavior:

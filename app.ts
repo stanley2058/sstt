@@ -26,6 +26,11 @@ type CleanupConfig = {
   timeoutMs: number;
 };
 
+type DesktopNotificationsConfig = {
+  enabled: boolean;
+  reminderIntervalMs: number;
+};
+
 type AppConfig = {
   provider: ProviderName;
   model?: string;
@@ -33,6 +38,7 @@ type AppConfig = {
   minDurationMs: number;
   transcriptionTimeoutMs: number;
   audioFeedback: AudioFeedbackConfig;
+  desktopNotifications: DesktopNotificationsConfig;
   cleanup: CleanupConfig;
   recording: {
     sampleRate: number;
@@ -46,6 +52,7 @@ type AppConfig = {
 
 type SessionState = {
   pid: number;
+  indicatorPid?: number;
   sink: Sink;
   startedAt: string;
   audioPath: string;
@@ -72,6 +79,7 @@ type BeepType = "start" | "stop";
 const APP_NAME = "sstt";
 const LEGACY_APP_NAME = "linux-stt";
 const MACOS_PASTE_RESTORE_DELAY_MS = 175;
+const DEFAULT_REMINDER_INTERVAL_MS = 5 * 60 * 1000;
 
 const DEFAULT_CONFIG: AppConfig = {
   provider: "groq",
@@ -84,6 +92,10 @@ const DEFAULT_CONFIG: AppConfig = {
     durationMs: 90,
     startFrequencyHz: 940,
     stopFrequencyHz: 680,
+  },
+  desktopNotifications: {
+    enabled: true,
+    reminderIntervalMs: DEFAULT_REMINDER_INTERVAL_MS,
   },
   cleanup: {
     enabled: false,
@@ -284,6 +296,9 @@ function parseConfig(raw: unknown): AppConfig {
   const apiKeysRaw = isRecord(raw.apiKeys) ? raw.apiKeys : {};
   const cleanupRaw = isRecord(raw.cleanup) ? raw.cleanup : {};
   const audioFeedbackRaw = isRecord(raw.audioFeedback) ? raw.audioFeedback : {};
+  const desktopNotificationsRaw = isRecord(raw.desktopNotifications)
+    ? raw.desktopNotifications
+    : {};
 
   const cleanupModelRaw = asOptionalString(cleanupRaw.model) ?? DEFAULT_CONFIG.cleanup.model;
   parseProviderModelSpec(cleanupModelRaw);
@@ -312,6 +327,16 @@ function parseConfig(raw: unknown): AppConfig {
       stopFrequencyHz: asPositiveNumber(
         audioFeedbackRaw.stopFrequencyHz,
         DEFAULT_CONFIG.audioFeedback.stopFrequencyHz,
+      ),
+    },
+    desktopNotifications: {
+      enabled: asBoolean(
+        desktopNotificationsRaw.enabled,
+        DEFAULT_CONFIG.desktopNotifications.enabled,
+      ),
+      reminderIntervalMs: asNonNegativeNumber(
+        desktopNotificationsRaw.reminderIntervalMs,
+        DEFAULT_CONFIG.desktopNotifications.reminderIntervalMs,
       ),
     },
     cleanup: {
@@ -420,6 +445,7 @@ async function readSession(): Promise<SessionState | null> {
     }
 
     const pid = parsed.pid;
+    const indicatorPid = parsed.indicatorPid;
     const sink = parsed.sink;
     const startedAt = parsed.startedAt;
     const audioPath = parsed.audioPath;
@@ -437,8 +463,13 @@ async function readSession(): Promise<SessionState | null> {
       return null;
     }
 
+    if (indicatorPid !== undefined && typeof indicatorPid !== "number") {
+      return null;
+    }
+
     return {
       pid,
+      indicatorPid,
       sink,
       startedAt,
       audioPath,
@@ -489,6 +520,79 @@ export function selectPlaybackCommand(
   }
 
   return null;
+}
+
+function quoteAppleScriptString(value: string): string {
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\n", "\\n")}"`;
+}
+
+export function getDesktopNotificationCommand(
+  platform: SupportedPlatform,
+  title: string,
+  body: string,
+  exists: (command: string) => boolean = commandExists,
+): CommandSpec | null {
+  if (platform === "darwin") {
+    if (!exists("osascript")) {
+      return null;
+    }
+
+    return {
+      command: "osascript",
+      args: [
+        "-e",
+        `display notification ${quoteAppleScriptString(body)} with title ${quoteAppleScriptString(title)}`,
+      ],
+    };
+  }
+
+  if (exists("notify-send")) {
+    return {
+      command: "notify-send",
+      args: ["-a", APP_NAME, title, body],
+    };
+  }
+
+  if (exists("kdialog")) {
+    return {
+      command: "kdialog",
+      args: ["--title", title, "--passivepopup", body, "10"],
+    };
+  }
+
+  return null;
+}
+
+async function sendDesktopNotification(
+  config: AppConfig,
+  title: string,
+  body: string,
+  warnIfUnavailable = true,
+): Promise<void> {
+  if (!config.desktopNotifications.enabled) {
+    return;
+  }
+
+  const notification = getDesktopNotificationCommand(PLATFORM, title, body);
+  if (!notification) {
+    if (warnIfUnavailable) {
+      console.error(
+        PLATFORM === "darwin"
+          ? "Warning: desktop notifications enabled, but osascript was not found"
+          : "Warning: desktop notifications enabled, but notify-send or kdialog was not found",
+      );
+    }
+
+    return;
+  }
+
+  try {
+    await runCommandQuiet(notification.command, notification.args);
+  } catch (error) {
+    if (warnIfUnavailable) {
+      console.error(`Warning: failed to show desktop notification. ${String(error)}`);
+    }
+  }
 }
 
 function writeAscii(view: DataView, offset: number, text: string): void {
@@ -673,6 +777,75 @@ async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boole
   }
 
   return !isProcessAlive(pid);
+}
+
+function formatElapsedDuration(startedAt: string): string {
+  const elapsedMs = Math.max(0, Date.now() - new Date(startedAt).getTime());
+  const totalSeconds = Math.round(elapsedMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+
+  return `${seconds}s`;
+}
+
+function startDesktopNotificationReminder(
+  config: AppConfig,
+  recordingPid: number,
+): number | undefined {
+  if (!config.desktopNotifications.enabled || config.desktopNotifications.reminderIntervalMs <= 0) {
+    return undefined;
+  }
+
+  if (!getDesktopNotificationCommand(PLATFORM, "", "", commandExists)) {
+    return undefined;
+  }
+
+  const scriptPath = process.argv[1];
+  if (!scriptPath) {
+    return undefined;
+  }
+
+  const indicator = Bun.spawn(
+    [
+      process.execPath,
+      scriptPath,
+      "indicator",
+      String(recordingPid),
+      String(config.desktopNotifications.reminderIntervalMs),
+    ],
+    {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      detached: true,
+    },
+  );
+
+  indicator.unref();
+  return indicator.pid;
+}
+
+async function stopIndicator(indicatorPid: number | undefined): Promise<void> {
+  if (!indicatorPid || !isProcessAlive(indicatorPid)) {
+    return;
+  }
+
+  try {
+    process.kill(indicatorPid, "SIGTERM");
+  } catch {
+    return;
+  }
+
+  await waitForProcessExit(indicatorPid, 1000);
 }
 
 function parseSinkArg(args: string[], commandName: "start" | "toggle"): Sink {
@@ -980,6 +1153,7 @@ async function startCommand(args: string[], preloadedConfig?: AppConfig): Promis
       );
     }
 
+    await stopIndicator(existing.indicatorPid);
     await clearSession();
   }
 
@@ -1002,14 +1176,25 @@ async function startCommand(args: string[], preloadedConfig?: AppConfig): Promis
     );
   }
 
-  await writeSession({
+  const session: SessionState = {
     pid: recording.pid,
     sink,
     startedAt: new Date().toISOString(),
     audioPath,
     sampleRate: config.recording.sampleRate,
     channels: config.recording.channels,
-  });
+  };
+
+  await writeSession(session);
+  await sendDesktopNotification(config, "sstt recording", `Recording to ${sink}`);
+
+  const indicatorPid = startDesktopNotificationReminder(config, recording.pid);
+  if (indicatorPid) {
+    await writeSession({
+      ...session,
+      indicatorPid,
+    });
+  }
 
   console.log(`Recording started (pid ${recording.pid}, sink ${sink})`);
 }
@@ -1052,8 +1237,10 @@ async function stopCommand(): Promise<void> {
   }
 
   await stopRecorder(session.pid);
+  await stopIndicator(session.indicatorPid);
   await clearSession();
   await playFeedbackTone(config, "stop");
+  await sendDesktopNotification(config, "sstt stopped", "Recording stopped; transcribing");
 
   const durationMs = await estimateWavDurationMs(
     session.audioPath,
@@ -1099,6 +1286,7 @@ async function toggleCommand(args: string[]): Promise<void> {
   }
 
   if (session) {
+    await stopIndicator(session.indicatorPid);
     await clearSession();
   }
 
@@ -1114,14 +1302,48 @@ async function statusCommand(): Promise<void> {
   }
 
   if (!isProcessAlive(session.pid)) {
+    await stopIndicator(session.indicatorPid);
     await clearSession();
     console.log("idle (cleaned stale session)");
     return;
   }
 
-  const elapsedMs = Date.now() - new Date(session.startedAt).getTime();
-  const elapsedSeconds = Math.max(0, Math.round(elapsedMs / 1000));
-  console.log(`recording pid=${session.pid} sink=${session.sink} elapsed=${elapsedSeconds}s`);
+  console.log(
+    `recording pid=${session.pid} sink=${session.sink} elapsed=${formatElapsedDuration(session.startedAt)}`,
+  );
+}
+
+async function indicatorCommand(args: string[]): Promise<void> {
+  if (args.length !== 2) {
+    throw new Error("indicator requires recording pid and reminder interval");
+  }
+
+  const recordingPid = Number(args[0]);
+  const reminderIntervalMs = Number(args[1]);
+  if (
+    !Number.isInteger(recordingPid) ||
+    recordingPid <= 0 ||
+    !Number.isFinite(reminderIntervalMs) ||
+    reminderIntervalMs <= 0
+  ) {
+    throw new Error("indicator requires a positive pid and reminder interval");
+  }
+
+  while (true) {
+    await sleep(reminderIntervalMs);
+
+    const session = await readSession();
+    if (!session || session.pid !== recordingPid || !isProcessAlive(recordingPid)) {
+      return;
+    }
+
+    await sendDesktopNotification(
+      DEFAULT_CONFIG,
+      "sstt still recording",
+      `Recording for ${formatElapsedDuration(session.startedAt)} to ${session.sink}`,
+      false,
+    );
+  }
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
@@ -1161,6 +1383,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
     await migrateLegacyPaths();
     await statusCommand();
+    return;
+  }
+
+  if (command === "indicator") {
+    await indicatorCommand(argv.slice(1));
     return;
   }
 

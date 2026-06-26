@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildMacPasteAppleScript,
   getAppPaths,
+  getDesktopNotificationCommand,
   getRecordingCommand,
   getSupportedPlatform,
   renderHelp,
@@ -21,6 +22,10 @@ const config = {
     durationMs: 90,
     startFrequencyHz: 940,
     stopFrequencyHz: 680,
+  },
+  desktopNotifications: {
+    enabled: true,
+    reminderIntervalMs: 300000,
   },
   cleanup: {
     enabled: false,
@@ -81,6 +86,39 @@ describe("command builders", () => {
     expect(selectPlaybackCommand("linux", (name) => name === "paplay")).toEqual({
       command: "paplay",
       args: [],
+    });
+  });
+
+  test("selects platform desktop notification command", () => {
+    expect(
+      getDesktopNotificationCommand(
+        "darwin",
+        "Title",
+        'Body "quoted"',
+        (name) => name === "osascript",
+      ),
+    ).toEqual({
+      command: "osascript",
+      args: ["-e", 'display notification "Body \\"quoted\\"" with title "Title"'],
+    });
+
+    expect(
+      getDesktopNotificationCommand(
+        "linux",
+        "Title",
+        "Body",
+        (name) => name === "notify-send",
+      ),
+    ).toEqual({
+      command: "notify-send",
+      args: ["-a", "sstt", "Title", "Body"],
+    });
+
+    expect(
+      getDesktopNotificationCommand("linux", "Title", "Body", (name) => name === "kdialog"),
+    ).toEqual({
+      command: "kdialog",
+      args: ["--title", "Title", "--passivepopup", "Body", "10"],
     });
   });
 });
